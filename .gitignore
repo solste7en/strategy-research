@@ -1,11 +1,9 @@
 # ── Local data & results (never commit) ────────────────────────────
 *.parquet
 strategy/data_cache/*
-strategy/schwab_cache/*
 strategy/results/*.csv
 strategy/results/*.md
 !strategy/data_cache/.gitkeep
-!strategy/schwab_cache/.gitkeep
 !strategy/results/.gitkeep
 
 # ── Credentials & secrets ───────────────────────────────────────────

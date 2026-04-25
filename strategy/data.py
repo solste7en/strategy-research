@@ -1,24 +1,24 @@
 """Intraday bar providers.
 
-Four implementations share a common `BarsProvider` interface:
+Three implementations share a common `BarsProvider` interface:
 
-    AlpacaBarsProvider   — Alpaca Market Data API (1-min bars, SIP consolidated
-                           feed, ~7 years back; free account sufficient)
-    SchwabBarsProvider   — Schwab priceHistory endpoint (1-min bars,
-                           ~48 calendar days back; used for live/recent data)
-    YFinanceBarsProvider — Yahoo via yfinance (5-min bars, ~60 days back)
-    ParquetBarsProvider  — reads a local parquet cache (fast replays for
-                           backtest; no network calls)
+    AlpacaBarsProvider  — Alpaca Market Data API (1-min SIP bars, ~7yr history;
+                          free account sufficient). Primary source for backtesting.
+    SchwabBarsProvider  — Schwab priceHistory endpoint (1-min bars, ~48 calendar
+                          days back). Backup / live-data source only.
+    ParquetBarsProvider — reads a local parquet cache (fast replays for backtest;
+                          no network calls).
 
-For backtesting, build the cache once with ``scripts/fetch_intraday_history.py
---source alpaca`` (3-year window, 1-min SIP bars), then run all backtests
-against the local parquet cache via ParquetBarsProvider.
+Workflow: build the cache once with ``scripts/fetch_intraday_history.py
+--source alpaca`` (default start 2023-01-01), then run all backtests against
+the local parquet cache via ParquetBarsProvider. Use ``--source schwab`` only
+to top up the cache with bars from the last 48 days if needed.
 
-The ``merge_bars`` helper stitches two providers into one continuous timeseries.
-The strategy treats all bars uniformly by looking up "closest bar at or before
-target time", so mixed 1m/5m granularity works without special handling.
+The ``merge_bars`` helper stitches two providers into one continuous timeseries,
+preferring the ``newer`` frame on overlapping days (useful for blending Alpaca
+history with recent Schwab bars).
 
-The cache layout is one parquet file per symbol under ``strategy/data_cache/``.
+Cache layout: one parquet file per symbol under ``strategy/data_cache/``.
 
 All bars are **regular session only (09:30–16:00 America/New_York)** with a
 timezone-aware DatetimeIndex. Core columns: open, high, low, close, volume.
@@ -83,7 +83,7 @@ def split_by_session_date(df: pd.DataFrame) -> dict[date, pd.DataFrame]:
 
 
 # ---------------------------------------------------------------------------
-# Alpaca provider (primary backtest source — 1-min SIP bars, ~7yr history)
+# Alpaca provider (primary — 1-min SIP bars, ~7yr history, free account)
 # ---------------------------------------------------------------------------
 
 
@@ -190,20 +190,22 @@ class AlpacaBarsProvider:
 
 
 # ---------------------------------------------------------------------------
-# Schwab live / cache-building provider
+# Schwab provider (backup — 1-min bars, ~48 calendar days back)
 # ---------------------------------------------------------------------------
 
 
 class SchwabBarsProvider:
     """Pulls 1-minute bars directly from Schwab's priceHistory API.
 
-    Used by ``scripts/fetch_intraday_history.py`` to build the parquet cache,
-    and by the live runner to fetch today's bars up to the current minute.
+    Backup / live-data source. Use when you need bars from the last 48 days
+    that are fresher than Alpaca's 15-minute historical delay, or to top up
+    the cache with sessions not yet covered by Alpaca.
 
-    Schwab's minute-bar window on `get_price_history_every_minute` is
-    approximately 48 calendar days when called without explicit start/end
-    — we pass datetimes to extend. If a requested range exceeds the broker's
-    window, the call returns a truncated payload; caller can chunk.
+    Requires token.json + Schwab credentials from the companion schwab_app
+    repo (core.auth.get_client). Not needed for pure backtesting from cache.
+
+    Schwab's minute-bar window is approximately 48 calendar days; we chunk
+    requests in 45-day windows when the requested range is larger.
     """
 
     def __init__(self, client=None):
@@ -247,7 +249,7 @@ class SchwabBarsProvider:
 
 
 # ---------------------------------------------------------------------------
-# Local parquet cache provider (fast backtest)
+# Local parquet cache provider (fast backtest — no network)
 # ---------------------------------------------------------------------------
 
 
@@ -317,76 +319,19 @@ def _empty_bars() -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# yfinance provider (5-min bars, ~60 days back)
+# Merge helper
 # ---------------------------------------------------------------------------
 
 
-class YFinanceBarsProvider:
-    """Pulls 5-minute bars from Yahoo via yfinance.
+def merge_bars(older: pd.DataFrame, newer: pd.DataFrame) -> pd.DataFrame:
+    """Stitch two bar DataFrames into one continuous timeseries.
 
-    Yahoo caps sub-hourly history at ~60 calendar days regardless of the
-    requested range. For our theory (15/30/60-min entry windows) 5-min
-    granularity is sufficient: decision and entry/exit fills snap to the
-    nearest 5-min boundary.
+    For days present in BOTH frames, ``newer`` wins (higher fidelity or more
+    recent source). For days only in ``older``, those bars are kept as-is.
+    Output is sorted and deduplicated on the datetime index.
 
-    Used only to *extend* history backwards beyond Schwab's ~48-day minute
-    window. For the most recent sessions prefer SchwabBarsProvider's 1-min
-    bars when available.
-    """
-
-    def __init__(self, interval: str = "5m"):
-        if interval not in {"1m", "2m", "5m", "15m", "30m", "60m", "1h"}:
-            raise ValueError(f"unsupported yfinance interval: {interval}")
-        self.interval = interval
-
-    def get_bars(self, symbol: str, start: date, end: date) -> pd.DataFrame:
-        import yfinance as yf  # local import — only needed when actually fetching
-
-        # yfinance's `period="60d"` fetches the maximum window in one call and
-        # is more reliable than explicit start/end for sub-hourly intervals.
-        # We fetch the max and then slice by caller's range.
-        t = yf.Ticker(symbol)
-        df = t.history(period="60d", interval=self.interval, auto_adjust=False)
-        if df.empty:
-            log.warning("yfinance returned no bars for %s", symbol)
-            return _empty_bars()
-
-        # yfinance may index in UTC or localtime depending on version — normalize.
-        idx = df.index
-        if idx.tz is None:
-            idx = idx.tz_localize("UTC")
-        df.index = idx.tz_convert(NY)
-
-        # Standardize column names to lower-case OHLCV.
-        df = df.rename(columns={
-            "Open": "open", "High": "high", "Low": "low",
-            "Close": "close", "Volume": "volume",
-        })[["open", "high", "low", "close", "volume"]].astype({
-            "open": float, "high": float, "low": float, "close": float,
-            "volume": "int64",
-        })
-        df.index.name = "datetime"
-        df = _filter_regular_session(df.sort_index())
-
-        # Slice to caller's date range inclusive.
-        idx_local = df.index.tz_convert(NY)
-        mask = (idx_local.date >= start) & (idx_local.date <= end)
-        return df.loc[mask]
-
-
-# ---------------------------------------------------------------------------
-# Merge helpers (build combined cache from Schwab + yfinance)
-# ---------------------------------------------------------------------------
-
-
-def merge_bars(
-    older: pd.DataFrame, newer: pd.DataFrame
-) -> pd.DataFrame:
-    """Stitch two bar DataFrames into one.
-
-    For days present in BOTH frames, prefer ``newer`` (typically Schwab 1-min
-    = higher fidelity than yfinance 5-min). For days only in ``older``,
-    keep the yfinance bars. Output is sorted and deduped on the datetime index.
+    Typical use: blend Alpaca history (older) with recent Schwab bars (newer)
+    to extend the cache up to the current session.
     """
     if older.empty and newer.empty:
         return _empty_bars()

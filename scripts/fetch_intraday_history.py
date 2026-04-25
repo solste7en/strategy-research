@@ -1,33 +1,29 @@
-"""Build the intraday bar cache from Alpaca, Schwab, yfinance, or combinations.
+"""Build the intraday bar cache from Alpaca or Schwab.
 
 Usage (from repo root):
 
-    # Recommended: Alpaca SIP 1-min bars, from 2023-01-01 to today (free account)
-    python3 scripts/fetch_intraday_history.py --source alpaca
+    # Default: Alpaca SIP 1-min bars, from 2023-01-01 to today (free account)
+    python3 scripts/fetch_intraday_history.py
 
     # Custom start date or symbol list
-    python3 scripts/fetch_intraday_history.py --source alpaca --start 2022-01-01
-    python3 scripts/fetch_intraday_history.py --source alpaca --symbols SPYM,NVDA
+    python3 scripts/fetch_intraday_history.py --start 2022-01-01
+    python3 scripts/fetch_intraday_history.py --symbols TSLA,NVDA
 
-    # Legacy sources (Schwab ~48d, yfinance ~60d, merged = both blended)
+    # Schwab: top up with the last 48 days of fresh 1-min bars
     python3 scripts/fetch_intraday_history.py --source schwab
-    python3 scripts/fetch_intraday_history.py --source yfinance
-    python3 scripts/fetch_intraday_history.py --source merged
 
 Output: one parquet file per symbol at strategy/data_cache/{SYMBOL}_1min.parquet.
 
 Credentials:
 - Alpaca: set ALPACA_API_KEY and ALPACA_API_SECRET in a .env file at the
   repo root (see .env.example). A free paper-trading account is sufficient.
-- Schwab: requires token.json + .env from the companion schwab_app repo.
+- Schwab: requires token.json + credentials from the companion schwab_app repo.
 
 Notes:
 - Alpaca returns 1-min SIP (consolidated tape) bars for historical data
-  (>15 min old) on the free plan. The SDK paginates large ranges automatically.
-- Schwab priceHistory returns ~48 calendar days of 1-min bars per request.
-  We chunk the requested range in 45-day windows.
-- yfinance caps sub-hourly history at ~60 calendar days (Yahoo-side limit).
-- Merge mode (schwab + yfinance) is additive: Schwab wins on overlapping days.
+  (>15 min old). The SDK paginates large date ranges automatically.
+- Schwab priceHistory covers ~48 calendar days of 1-min bars. Requests are
+  chunked in 45-day windows when the range is larger.
 """
 from __future__ import annotations
 
@@ -47,7 +43,6 @@ import pandas as pd  # noqa: E402
 from strategy.data import (  # noqa: E402
     AlpacaBarsProvider,
     SchwabBarsProvider,
-    YFinanceBarsProvider,
     merge_bars,
     write_cache,
 )
@@ -62,9 +57,6 @@ _ALPACA_DEFAULT_START = date(2023, 1, 1)
 _SCHWAB_CHUNK_DAYS = 45
 _SCHWAB_WINDOW_DAYS = 48
 
-# Yahoo returns ~60 trading SESSIONS of 5-min bars, spanning ~85 calendar days.
-_YFINANCE_WINDOW_DAYS = 100
-
 
 def _chunked_ranges(start: date, end: date, chunk: int = _SCHWAB_CHUNK_DAYS):
     cursor = start
@@ -76,11 +68,11 @@ def _chunked_ranges(start: date, end: date, chunk: int = _SCHWAB_CHUNK_DAYS):
 
 def _fetch_alpaca(symbol: str, start: date, end: date) -> pd.DataFrame:
     """Fetch 1-min SIP bars from Alpaca. SDK paginates automatically."""
-    provider = AlpacaBarsProvider()
-    return provider.get_bars(symbol, start, end)
+    return AlpacaBarsProvider().get_bars(symbol, start, end)
 
 
 def _fetch_schwab(symbol: str, start: date, end: date) -> pd.DataFrame:
+    """Fetch 1-min bars from Schwab in 45-day chunks."""
     provider = SchwabBarsProvider()
     frames: list[pd.DataFrame] = []
     for a, b in _chunked_ranges(start, end):
@@ -91,29 +83,7 @@ def _fetch_schwab(symbol: str, start: date, end: date) -> pd.DataFrame:
     if not frames:
         return pd.DataFrame()
     out = pd.concat(frames).sort_index()
-    out = out[~out.index.duplicated(keep="first")]
-    return out
-
-
-def _fetch_yfinance(symbol: str, start: date, end: date) -> pd.DataFrame:
-    provider = YFinanceBarsProvider(interval="5m")
-    log.info("yfinance: fetching %s %s..%s (5m)", symbol, start, end)
-    return provider.get_bars(symbol, start, end)
-
-
-def _fetch_merged(symbol: str, end: date) -> pd.DataFrame:
-    """Legacy: yfinance (~100d, 5-min) blended with Schwab (~48d, 1-min).
-
-    Both calls use their respective max windows; overlap resolved by
-    merge_bars keeping Schwab (1-min) over yfinance (5-min) on shared days.
-    """
-    yf_start = end - timedelta(days=_YFINANCE_WINDOW_DAYS)
-    yf_df = _fetch_yfinance(symbol, yf_start, end)
-
-    sch_start = end - timedelta(days=_SCHWAB_WINDOW_DAYS)
-    sch_df = _fetch_schwab(symbol, sch_start, end)
-
-    return merge_bars(older=yf_df, newer=sch_df)
+    return out[~out.index.duplicated(keep="first")]
 
 
 def main():
@@ -122,10 +92,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python3 scripts/fetch_intraday_history.py --source alpaca\n"
-            "  python3 scripts/fetch_intraday_history.py --source alpaca --start 2022-01-01\n"
-            "  python3 scripts/fetch_intraday_history.py --source alpaca --symbols TSLA,NVDA\n"
-            "  python3 scripts/fetch_intraday_history.py --source merged   # legacy\n"
+            "  # Full Alpaca load (default)\n"
+            "  python3 scripts/fetch_intraday_history.py\n\n"
+            "  # Custom start or symbols\n"
+            "  python3 scripts/fetch_intraday_history.py --start 2022-01-01\n"
+            "  python3 scripts/fetch_intraday_history.py --symbols TSLA,NVDA\n\n"
+            "  # Top up with recent Schwab bars (last 48 days)\n"
+            "  python3 scripts/fetch_intraday_history.py --source schwab\n"
         ),
     )
     parser.add_argument(
@@ -135,43 +108,30 @@ def main():
     )
     parser.add_argument(
         "--source",
-        choices=["alpaca", "merged", "schwab", "yfinance"],
+        choices=["alpaca", "schwab"],
         default="alpaca",
-        help=(
-            "Data source. "
-            "'alpaca' = 1-min SIP bars from 2023-01-01 (recommended, free). "
-            "'merged' = legacy Schwab 1-min + yfinance 5-min blend (~60d). "
-            "Default: alpaca"
-        ),
+        help="Data source. 'alpaca' = primary (default). 'schwab' = backup, last ~48 days.",
     )
     parser.add_argument(
         "--start",
         default=None,
-        help=(
-            "Start date YYYY-MM-DD. "
-            "Alpaca default: 2023-01-01. "
-            "Schwab/yfinance/merged: ignored (window-based, use --days instead)."
-        ),
+        help="Start date YYYY-MM-DD. Alpaca default: 2023-01-01. Ignored for --source schwab.",
     )
     parser.add_argument(
         "--days",
         type=int,
         default=None,
-        help=(
-            "Trailing calendar days (alternative to --start for Schwab/yfinance). "
-            "Ignored when --start is set. "
-            "Defaults: schwab=48, yfinance=100, merged=100."
-        ),
+        help="Trailing calendar days (schwab only, alternative to --start). Default: 48.",
     )
-    parser.add_argument("--end", default=None, help="End date YYYY-MM-DD (default: today).")
+    parser.add_argument(
+        "--end",
+        default=None,
+        help="End date YYYY-MM-DD. Default: today.",
+    )
     parser.add_argument(
         "--output-dir",
         default=None,
-        help=(
-            "Directory to write parquet files into. "
-            "Defaults to strategy/data_cache/. "
-            "Set to strategy/schwab_cache/ to keep Schwab bars in a separate cache."
-        ),
+        help="Directory to write parquet files into. Default: strategy/data_cache/.",
     )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
@@ -188,29 +148,21 @@ def main():
         output_dir = _ROOT / output_dir
 
     # Resolve start date.
-    if args.start:
-        start = date.fromisoformat(args.start)
-    elif args.source == "alpaca":
-        start = _ALPACA_DEFAULT_START
-    else:
-        days = args.days or {"schwab": _SCHWAB_WINDOW_DAYS, "yfinance": _YFINANCE_WINDOW_DAYS,
-                             "merged": _YFINANCE_WINDOW_DAYS}[args.source]
+    if args.source == "schwab":
+        days = args.days or _SCHWAB_WINDOW_DAYS
         start = end - timedelta(days=days)
+    else:  # alpaca
+        start = date.fromisoformat(args.start) if args.start else _ALPACA_DEFAULT_START
 
     log.info(
         "source=%s symbols=%s start=%s end=%s output_dir=%s",
-        args.source, symbols, start, end, output_dir or "default (strategy/data_cache/)",
+        args.source, symbols, start, end,
+        output_dir or "default (strategy/data_cache/)",
     )
 
     for sym in symbols:
-        if args.source == "alpaca":
-            df = _fetch_alpaca(sym, start, end)
-        elif args.source == "schwab":
-            df = _fetch_schwab(sym, start, end)
-        elif args.source == "yfinance":
-            df = _fetch_yfinance(sym, start, end)
-        else:  # merged (legacy)
-            df = _fetch_merged(sym, end)
+        df = _fetch_alpaca(sym, start, end) if args.source == "alpaca" \
+            else _fetch_schwab(sym, start, end)
 
         if df.empty:
             log.warning("no bars for %s, skipping cache write", sym)

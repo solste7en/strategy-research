@@ -1,12 +1,11 @@
 # Data — primary source
 alpaca-py>=0.20.0          # 1-min SIP bars, 3yr history, free account
 
-# Data — supplementary / legacy
+# Data
 pandas>=2.0.0
 pyarrow>=14.0.0
-yfinance>=0.2.0
 
-# Schwab API (only needed for live data fetching via SchwabBarsProvider)
+# Schwab API (backup source — only needed for SchwabBarsProvider)
 schwab-py
 
 # Credentials from .env file
