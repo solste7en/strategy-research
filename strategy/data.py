@@ -1,24 +1,28 @@
 """Intraday bar providers.
 
-Three implementations share a common `BarsProvider` interface:
+Four implementations share a common `BarsProvider` interface:
 
-    SchwabBarsProvider   — hits Schwab's priceHistory endpoint (1-min bars,
-                           ~48 calendar days back)
-    YFinanceBarsProvider — hits Yahoo via yfinance (5-min bars, ~60 days back
-                           — that's the Yahoo-side max for sub-hourly)
+    AlpacaBarsProvider   — Alpaca Market Data API (1-min bars, SIP consolidated
+                           feed, ~7 years back; free account sufficient)
+    SchwabBarsProvider   — Schwab priceHistory endpoint (1-min bars,
+                           ~48 calendar days back; used for live/recent data)
+    YFinanceBarsProvider — Yahoo via yfinance (5-min bars, ~60 days back)
     ParquetBarsProvider  — reads a local parquet cache (fast replays for
-                           backtest)
+                           backtest; no network calls)
 
-The ``merge_bars`` helper stitches Schwab (recent, 1-min) + yfinance
-(pre-Schwab window, 5-min) into one continuous timeseries. The strategy
-treats all bars uniformly by looking up "closest bar at or before target
-time", so mixed 1m/5m granularity works without special handling, at the
-cost of slightly coarser fill prices on the yfinance portion.
+For backtesting, build the cache once with ``scripts/fetch_intraday_history.py
+--source alpaca`` (3-year window, 1-min SIP bars), then run all backtests
+against the local parquet cache via ParquetBarsProvider.
+
+The ``merge_bars`` helper stitches two providers into one continuous timeseries.
+The strategy treats all bars uniformly by looking up "closest bar at or before
+target time", so mixed 1m/5m granularity works without special handling.
 
 The cache layout is one parquet file per symbol under ``strategy/data_cache/``.
 
 All bars are **regular session only (09:30–16:00 America/New_York)** with a
-timezone-aware DatetimeIndex. Column order: open, high, low, close, volume.
+timezone-aware DatetimeIndex. Core columns: open, high, low, close, volume.
+AlpacaBarsProvider additionally populates ``vwap`` and ``trade_count`` per bar.
 """
 from __future__ import annotations
 
@@ -76,6 +80,113 @@ def split_by_session_date(df: pd.DataFrame) -> dict[date, pd.DataFrame]:
         d: df.loc[idx_local.date == d]
         for d in sorted({dt.date() for dt in idx_local})
     }
+
+
+# ---------------------------------------------------------------------------
+# Alpaca provider (primary backtest source — 1-min SIP bars, ~7yr history)
+# ---------------------------------------------------------------------------
+
+
+class AlpacaBarsProvider:
+    """Pulls 1-minute bars from Alpaca's Market Data API.
+
+    Uses the SIP (consolidated tape) feed, which covers all US exchanges and
+    is available for historical data (older than 15 minutes) on the free plan.
+    A free paper-trading account at alpaca.markets is sufficient — no funded
+    account is needed.
+
+    Credentials are resolved in this order:
+      1. Explicit ``api_key`` / ``api_secret`` constructor arguments.
+      2. ``ALPACA_API_KEY`` / ``ALPACA_API_SECRET`` environment variables
+         (loaded from a ``.env`` file in the repo root if python-dotenv is
+         installed).
+
+    Returns bars with columns: open, high, low, close, volume, vwap,
+    trade_count. The extra ``vwap`` (bar-level VWAP from the consolidated
+    tape) and ``trade_count`` (number of individual trades in the bar) exceed
+    the base BarsProvider contract but are available to strategies that want
+    them and are preserved in the parquet cache.
+
+    Prices are split-adjusted (``adjustment="split"``).
+    """
+
+    def __init__(self, api_key: str | None = None, api_secret: str | None = None):
+        self._api_key = api_key
+        self._api_secret = api_secret
+        self._client = None
+
+    @property
+    def client(self):
+        if self._client is None:
+            import os
+            from alpaca.data.historical import StockHistoricalDataClient  # lazy
+
+            # Try loading .env from the repo root so credentials don't need
+            # to be exported in the shell manually.
+            try:
+                from dotenv import load_dotenv
+                load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+            except ImportError:
+                pass
+
+            key = self._api_key or os.environ.get("ALPACA_API_KEY")
+            secret = self._api_secret or os.environ.get("ALPACA_API_SECRET")
+            if not key or not secret:
+                raise RuntimeError(
+                    "Alpaca credentials not found. Set ALPACA_API_KEY and "
+                    "ALPACA_API_SECRET in your .env file or as environment "
+                    "variables. A free paper-trading account at "
+                    "alpaca.markets is sufficient."
+                )
+            self._client = StockHistoricalDataClient(api_key=key, secret_key=secret)
+        return self._client
+
+    def get_bars(self, symbol: str, start: date, end: date) -> pd.DataFrame:
+        from alpaca.data.requests import StockBarsRequest          # lazy
+        from alpaca.data.timeframe import TimeFrame, TimeFrameUnit  # lazy
+
+        start_dt = datetime.combine(start, SESSION_OPEN, tzinfo=NY)
+        # End at 16:00 on the last day so the final session is fully included.
+        end_dt = datetime.combine(end, SESSION_CLOSE, tzinfo=NY)
+
+        request = StockBarsRequest(
+            symbol_or_symbols=symbol.upper(),
+            timeframe=TimeFrame(1, TimeFrameUnit.Minute),
+            start=start_dt,
+            end=end_dt,
+            feed="sip",          # consolidated tape, all exchanges
+            adjustment="split",  # split-adjusted prices
+        )
+        log.info("alpaca: fetching %s %s..%s (SIP, 1-min)", symbol, start, end)
+        bars = self.client.get_stock_bars(request)
+        df: pd.DataFrame = bars.df
+
+        if df.empty:
+            log.warning("Alpaca returned no bars for %s %s..%s", symbol, start, end)
+            return _empty_bars()
+
+        # Response has a MultiIndex (symbol, timestamp) — drop the symbol level.
+        if isinstance(df.index, pd.MultiIndex):
+            df = df.droplevel(0)
+
+        # Normalize timezone to NY.
+        if df.index.tz is None:
+            df.index = df.index.tz_localize("UTC")
+        df.index = df.index.tz_convert(NY)
+        df.index.name = "datetime"
+        df = df.sort_index()
+
+        # Select and type-cast available columns.
+        want = ["open", "high", "low", "close", "volume", "vwap", "trade_count"]
+        cols = [c for c in want if c in df.columns]
+        dtype_map: dict[str, str] = {
+            "open": "float64", "high": "float64", "low": "float64",
+            "close": "float64", "volume": "int64",
+            "vwap": "float64", "trade_count": "int64",
+        }
+        df = df[cols].astype({c: dtype_map[c] for c in cols})
+
+        return _filter_regular_session(df)
 
 
 # ---------------------------------------------------------------------------
