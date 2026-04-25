@@ -1,0 +1,14 @@
+# Data
+pandas>=2.0.0
+pyarrow>=14.0.0
+yfinance>=0.2.0
+
+# Schwab API (only needed for live data fetching via SchwabBarsProvider)
+schwab-py
+
+# Testing
+pytest>=8.0.0
+pytest-cov>=6.0.0
+
+# Linting
+ruff>=0.8.0
