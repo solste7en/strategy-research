@@ -1,14 +1,15 @@
-# Data — primary source
-alpaca-py>=0.20.0          # 1-min SIP bars, 3yr history, free account
+# Data — primary source (Alpaca 1-min SIP bars, free paper account, ~3yr history)
+alpaca-py>=0.20.0
 
-# Data
+# Data processing
 pandas>=2.0.0
 pyarrow>=14.0.0
+numpy>=1.26.0
 
-# Schwab API (backup source — only needed for SchwabBarsProvider)
+# Schwab API (backup source — only needed for SchwabBarsProvider / --source schwab)
 schwab-py
 
-# Credentials from .env file
+# Credentials from .env file (ALPACA_API_KEY, ALPACA_API_SECRET)
 python-dotenv>=1.0.0
 
 # Testing & reporting

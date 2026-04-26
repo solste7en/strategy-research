@@ -1,4 +1,10 @@
-"""Run a grid-search backtest on cached bars for one of four strategies.
+"""Legacy single-window backtest runner (grid-search only, no walk-forward split).
+
+NOTE: For the recommended train / walk-forward workflow use
+``scripts/run_backtest_generic.py`` instead. This script is retained for
+quick single-window explorations with a rolling-date-range interface.
+
+Supports: ioe (overextension), orb, vwap, vsm (volume_surge), mfi.
 
 Usage (from repo root):
 
@@ -7,6 +13,7 @@ Usage (from repo root):
     python3 scripts/run_backtest.py --strategy orb
     python3 scripts/run_backtest.py --strategy vwap
     python3 scripts/run_backtest.py --strategy volume_surge
+    python3 scripts/run_backtest.py --strategy mfi
 
     python3 scripts/run_backtest.py --symbols NVDA,COIN
     python3 scripts/run_backtest.py --start 2026-01-28 --end 2026-04-24
@@ -15,9 +22,6 @@ Usage (from repo root):
     # Walk-forward validation: grid on train sessions, verify top config on test
     python3 scripts/run_backtest.py --walk-forward
     python3 scripts/run_backtest.py --walk-forward --n-train 45 --n-test 15
-
-    # Train on Yahoo 5m cache; test on higher-fidelity Schwab 1m cache
-    python3 scripts/run_backtest.py --walk-forward --test-cache-dir strategy/schwab_cache
 
 Outputs files in strategy/results/:
     backtest_<strategy>_<tag>.csv  — all (symbol × config) rows with metrics

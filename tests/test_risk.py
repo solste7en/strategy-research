@@ -6,14 +6,14 @@ import pytest
 from strategy.risk import DEFAULT_UNIVERSE, RiskConfig, RiskManager, size_trade
 
 
-def test_size_trade_floors_to_whole_shares():
-    # $100 budget, $49.99 price → floor(100/49.99) = 2 shares
-    assert size_trade(100.0, 49.99) == 2
+def test_size_trade_returns_fractional_shares():
+    # $100 budget, $49.99 price → 100/49.99 ≈ 2.0004 shares (fractional OK)
+    assert size_trade(100.0, 49.99) == pytest.approx(100.0 / 49.99)
 
 
-def test_size_trade_always_at_least_one_share():
-    # $100 budget, $500 price → floor would be 0, rule bumps to 1
-    assert size_trade(100.0, 500.0) == 1
+def test_size_trade_fractional_for_high_priced_stock():
+    # $100 budget, $500 stock → 0.2 shares (no minimum-1-share rule; brokers support fractional)
+    assert size_trade(100.0, 500.0) == pytest.approx(0.2)
 
 
 def test_size_trade_rejects_nonpositive_price():
@@ -24,8 +24,9 @@ def test_size_trade_rejects_nonpositive_price():
 
 
 def test_risk_config_universe_size_cap():
+    # max_universe_size defaults to 20; 21 tickers should raise
     with pytest.raises(ValueError):
-        RiskConfig(universe=("A", "B", "C", "D", "E", "F"))
+        RiskConfig(universe=tuple(f"T{i}" for i in range(21)))
 
 
 def test_can_trade_rejects_non_universe_symbols():
@@ -54,6 +55,9 @@ def test_trade_counter_resets_across_days():
     assert allowed
 
 
-def test_default_universe_is_five_tickers():
-    assert len(DEFAULT_UNIVERSE) == 5
-    assert set(DEFAULT_UNIVERSE) == {"SPYM", "TQQQ", "TSLA", "NVDA", "COIN"}
+def test_default_universe():
+    assert len(DEFAULT_UNIVERSE) == 12
+    assert set(DEFAULT_UNIVERSE) == {
+        "SPYM", "TQQQ", "TSLA", "NVDA", "COIN",
+        "LYFT", "UBER", "HIMS", "RBLX", "HOOD", "PDD", "NFLX",
+    }

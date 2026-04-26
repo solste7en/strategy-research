@@ -1,13 +1,18 @@
-"""Generic train / walk-forward backtest runner.
+"""Train / walk-forward backtest runner — all six strategies.
 
-Supports all five strategies with per-ticker parameter grids.
-Train on one date range, pick the best config per ticker, then test
-on a separate out-of-sample window — no look-ahead.
+Grid-searches parameters on the training window, picks the best config per
+ticker, then replays that single config on the hold-out window (no look-ahead).
 
 Usage (from repo root):
 
     # IOE — Intraday Overextension
     python3 scripts/run_backtest_generic.py --strategy ioe
+
+    # ORB — Opening Range Breakout
+    python3 scripts/run_backtest_generic.py --strategy orb
+
+    # VWAP — Mean Reversion
+    python3 scripts/run_backtest_generic.py --strategy vwap
 
     # VSM — Volume Surge Momentum
     python3 scripts/run_backtest_generic.py --strategy vsm
@@ -15,11 +20,8 @@ Usage (from repo root):
     # MFI — MFI Divergence
     python3 scripts/run_backtest_generic.py --strategy mfi
 
-    # ORB — Opening Range Breakout
-    python3 scripts/run_backtest_generic.py --strategy orb
-
-    # VWAP — VWAP Mean Reversion
-    python3 scripts/run_backtest_generic.py --strategy vwap
+    # IMC — Intraday Momentum Continuation (experimental)
+    python3 scripts/run_backtest_generic.py --strategy imc
 
     # Custom date ranges
     python3 scripts/run_backtest_generic.py --strategy vsm \\
@@ -29,15 +31,18 @@ Usage (from repo root):
     # Subset of tickers
     python3 scripts/run_backtest_generic.py --strategy mfi --symbols TSLA,NVDA,COIN
 
+    # Verbose (per-day debug logs)
+    python3 scripts/run_backtest_generic.py --strategy ioe -v
+
 Defaults:
     --train-start  2025-01-01
     --train-end    2025-12-31
     --test-start   2026-01-01
     --test-end     2026-04-24
-    --per-trade    1000
-    --max-trades   10
-    --min-trades   10     (min trades for a config to qualify)
-    --top-n        3      (top configs shown per ticker in training report)
+    --per-trade    1000          (notional dollars per trade; fractional shares)
+    --max-trades   10            (max trades per day across the universe)
+    --min-trades   10            (min trades for a config to qualify)
+    --top-n        3             (top configs shown per ticker in training report)
 """
 from __future__ import annotations
 
@@ -125,10 +130,11 @@ def main():
         description="Train/walk-forward backtest for any strategy.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Strategies: ioe, orb, vwap, vsm, mfi\n\n"
+            "Strategies: ioe, orb, vwap, vsm, mfi, imc\n\n"
             "Examples:\n"
             "  python3 scripts/run_backtest_generic.py --strategy vsm\n"
             "  python3 scripts/run_backtest_generic.py --strategy mfi --symbols TSLA,NVDA,COIN\n"
+            "  python3 scripts/run_backtest_generic.py --strategy imc\n"
             "  python3 scripts/run_backtest_generic.py --strategy orb "
             "--train-start 2024-01-01 --train-end 2024-12-31 "
             "--test-start 2025-01-01 --test-end 2025-12-31\n"
@@ -141,7 +147,7 @@ def main():
     parser.add_argument("--test-start",   default="2026-01-01", help="Walk-forward start date (YYYY-MM-DD).")
     parser.add_argument("--test-end",     default="2026-04-24", help="Walk-forward end date (YYYY-MM-DD).")
     parser.add_argument("--symbols",      default=",".join(DEFAULT_UNIVERSE),
-                        help=f"Comma-separated tickers. Default: all 12.")
+                        help=f"Comma-separated tickers. Default: full 12-ticker universe.")
     parser.add_argument("--per-trade",    type=float, default=1_000.0,
                         help="Notional dollars per trade (fractional shares). Default: 1000.")
     parser.add_argument("--max-trades",   type=int, default=10,

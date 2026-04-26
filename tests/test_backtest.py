@@ -17,7 +17,7 @@ from strategy.backtest import (
 )
 from strategy.risk import RiskConfig
 from strategy.strategies.intraday_overextension import IntradayOverextensionParams
-from tests.strategy.conftest import make_day_bars
+from tests.conftest import make_day_bars
 
 
 class InMemoryBarsProvider:

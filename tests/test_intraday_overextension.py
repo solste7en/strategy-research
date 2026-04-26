@@ -108,7 +108,7 @@ def test_multi_day_input_raises(up_overextension_day, down_overextension_day):
     mixed = pd.concat([up_overextension_day, down_overextension_day])
     # Only true if fixtures used different dates — our fixtures share a date,
     # so we build a true multi-day frame inline:
-    from tests.strategy.conftest import make_day_bars
+    from tests.conftest import make_day_bars
     from datetime import date
     d1 = make_day_bars(date(2026, 3, 4), move_pct_at_minute={30: 0.02})
     d2 = make_day_bars(date(2026, 3, 5), move_pct_at_minute={30: -0.02})
