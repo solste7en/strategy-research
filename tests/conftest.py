@@ -107,3 +107,20 @@ def quiet_day(sample_session):
         open_price=100.0,
         move_pct_at_minute={30: 0.003, 180: -0.003, 389: 0.001},
     )
+
+
+def make_market_context_day(
+    session: date,
+    morning_pct: float,
+    open_price: float = 500.0,
+) -> pd.DataFrame:
+    """Build a market-index context day (e.g. SPYM) with a clean morning move.
+
+    Pinned to ``morning_pct`` at minute 30 (10:00 ET) and held flat through
+    the rest of the session, so the IMC market filter sees a stable r_open.
+    """
+    return make_day_bars(
+        session,
+        open_price=open_price,
+        move_pct_at_minute={30: morning_pct, 389: morning_pct},
+    )

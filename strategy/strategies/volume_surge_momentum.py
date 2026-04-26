@@ -80,9 +80,16 @@ class VolumeSurgeMomentumStrategy:
         self.params = params
 
     def generate_trades_for_day(
-        self, symbol: str, day_bars: pd.DataFrame
+        self,
+        symbol: str,
+        day_bars: pd.DataFrame,
+        context_bars: dict[str, pd.DataFrame] | None = None,
     ) -> list[Trade]:
-        """Return at most one Trade for this symbol today."""
+        """Return at most one Trade for this symbol today.
+
+        ``context_bars`` is accepted for harness compatibility but unused.
+        """
+        del context_bars
         if day_bars.empty:
             return []
         p = self.params

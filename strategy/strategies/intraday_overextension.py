@@ -75,9 +75,17 @@ class IntradayOverextensionStrategy:
     # ---- core logic ----
 
     def generate_trades_for_day(
-        self, symbol: str, day_bars: pd.DataFrame
+        self,
+        symbol: str,
+        day_bars: pd.DataFrame,
+        context_bars: dict[str, pd.DataFrame] | None = None,
     ) -> list[Trade]:
-        """Return at most one Trade for this symbol today. Empty list = no-trade day."""
+        """Return at most one Trade for this symbol today. Empty list = no-trade day.
+
+        ``context_bars`` is accepted for harness compatibility but unused —
+        IOE is a single-symbol strategy.
+        """
+        del context_bars
         if day_bars.empty:
             return []
         p = self.params

@@ -153,6 +153,16 @@ If a ticker moves more than N% from its session open within the first `entry_win
 
 Key parameters: `threshold_pct`, `entry_window_minutes`, `exit_window_minutes`, `direction`.
 
+### Intraday Momentum Continuation (IMC) — *experimental*
+
+Based on Gao-Han-Li-Zhou (JFE 2018, replicated through 2026): the morning return predicts the last-half-hour return. At a fixed decision time (default 15:00 ET) we measure the morning return `r_open` and compute an ATR over the prior `atr_period_bars`. If `|r_open| > atr_multiple × atr` we enter in the direction of `r_open` and exit at `exit_time_minutes` (default 15:55 ET). ATR-normalization replaces the fixed-bps thresholds that overfit in the other strategies.
+
+Optionally requires the SPYM morning return to agree in sign (`use_market_filter=True`) — this is the first strategy in the framework to read cross-asset context, exposed via the additive `context_bars` extension on the `Strategy` Protocol and the `context_symbols` field on `BacktestRunner`.
+
+Key parameters: `observation_window_minutes`, `decision_time_minutes`, `exit_time_minutes`, `atr_period_bars`, `atr_multiple`, `volume_z_threshold`, `use_market_filter`, `direction_mode`.
+
+**Status:** training-set Sharpe is strong (12/12 tickers profitable on 2025) but the 2026-Q1 walk-forward came in at −$330 / 2-of-12 profitable, missing the strategy's own acceptance bar. See [`strategy/results/imc_walkforward_analysis.md`](strategy/results/imc_walkforward_analysis.md) for the full postmortem and proposed next steps.
+
 ---
 
 ## Risk rules

@@ -54,6 +54,10 @@ from strategy.strategies.mfi_divergence import (
     MFIDivergenceParams,
     MFIDivergenceStrategy,
 )
+from strategy.strategies.intraday_momentum_continuation import (
+    IMCParams,
+    IntradayMomentumContinuationStrategy,
+)
 
 log = logging.getLogger(__name__)
 
@@ -189,6 +193,11 @@ class BacktestRunner:
     end: date
     risk_config: RiskConfig = None  # defaults filled at __post_init__
     slippage_bps: float = 2.0
+    # Optional cross-asset context (e.g. SPYM as a market-regime filter for
+    # IMC). Symbols here are loaded once and sliced per day before being
+    # passed into ``generate_trades_for_day(... context_bars=)``. These are
+    # NOT part of the trading universe and do not consume risk budget.
+    context_symbols: tuple[str, ...] = ()
 
     def __post_init__(self):
         if self.risk_config is None:
@@ -242,6 +251,21 @@ class BacktestRunner:
                 sym, len(by_symbol_by_day[sym]), self.start, self.end,
             )
 
+        # Preload context symbols (not part of the trading universe). Skip
+        # any context symbol that is already in the trading universe to
+        # avoid redundant I/O.
+        context_by_day: dict[str, dict[date, pd.DataFrame]] = {}
+        for ctx_sym in self.context_symbols:
+            if ctx_sym in by_symbol_by_day:
+                context_by_day[ctx_sym] = by_symbol_by_day[ctx_sym]
+                continue
+            full_ctx = self.bars_provider.get_bars(ctx_sym, self.start, self.end)
+            context_by_day[ctx_sym] = split_by_session_date(full_ctx)
+            log.info(
+                "loaded context %s: %d days between %s and %s",
+                ctx_sym, len(context_by_day[ctx_sym]), self.start, self.end,
+            )
+
         total_cells = sum(len(per_ticker_grid[s]) for s in self.universe)
         log.info(
             "running per-ticker grids: %d total cells across %d symbols",
@@ -261,7 +285,17 @@ class BacktestRunner:
                         log.debug("skip %s %s: %s", sym, d, reason)
                         continue
 
-                    candidate_trades = strat.generate_trades_for_day(sym, day_bars)
+                    if context_by_day:
+                        ctx_for_day: dict[str, pd.DataFrame] | None = {
+                            cs: context_by_day[cs].get(d, pd.DataFrame())
+                            for cs in self.context_symbols
+                        }
+                    else:
+                        ctx_for_day = None
+
+                    candidate_trades = strat.generate_trades_for_day(
+                        sym, day_bars, context_bars=ctx_for_day,
+                    )
                     for ct in candidate_trades:
                         shares = risk.size_for(ct.entry_price)
                         sized = Trade(
@@ -577,3 +611,94 @@ def build_vsm_grids(
             for lb, vm, mp, xw, dm in product(lookback_bars, volume_multipliers, moves, exit_windows, direction_modes)
         ]
     return grids
+
+
+# ---------------------------------------------------------------------------
+# IMC (Intraday Momentum Continuation) grid builders
+# ---------------------------------------------------------------------------
+
+# ATR multiples per ticker. Higher-volatility names need a tighter multiple
+# because a fixed ATR fraction maps to a wider $-move; lower-vol names need
+# a looser multiple or they never trigger. Calibrated so ~30–50% of sessions
+# clear the threshold on the 2025 sample.
+_IMC_ATR_MULTIPLES: dict[str, tuple[float, ...]] = {
+    "SPYM": (0.50, 0.75, 1.00),  # tight index ETF, frequent small moves
+    "TQQQ": (0.50, 0.75, 1.00),  # 3x leveraged, looser ATR but bigger gross move
+    "TSLA": (0.50, 0.75, 1.00),
+    "NVDA": (0.50, 0.75, 1.00),
+    "COIN": (0.50, 0.75, 1.00),
+    "LYFT": (0.50, 0.75, 1.00),
+    "UBER": (0.50, 0.75, 1.00),
+    "HIMS": (0.50, 0.75, 1.00),
+    "RBLX": (0.50, 0.75, 1.00),
+    "HOOD": (0.50, 0.75, 1.00),
+    "PDD":  (0.50, 0.75, 1.00),
+    "NFLX": (0.50, 0.75, 1.00),
+}
+
+_IMC_OBSERVATION_WINDOWS = (30, 60)            # minutes from open
+_IMC_DECISION_TIME       = (330,)              # 15:00 ET
+_IMC_EXIT_TIME           = (385,)              # 15:55 ET
+_IMC_ATR_PERIODS         = (14, 30)            # 1-min bars
+_IMC_VOLUME_Z_THRESHOLDS = (float("-inf"), 0.5)  # off / require above-mean volume
+_IMC_USE_MARKET_FILTER   = (False, True)
+_IMC_DIRECTION_MODES     = ("symmetric", "long_only", "short_only")
+
+
+def build_imc_grids(
+    universe: tuple[str, ...],
+    atr_multiples_by_ticker: dict[str, tuple[float, ...]] | None = None,
+    observation_windows: tuple[int, ...] = _IMC_OBSERVATION_WINDOWS,
+    decision_times: tuple[int, ...] = _IMC_DECISION_TIME,
+    exit_times: tuple[int, ...] = _IMC_EXIT_TIME,
+    atr_periods: tuple[int, ...] = _IMC_ATR_PERIODS,
+    volume_z_thresholds: tuple[float, ...] = _IMC_VOLUME_Z_THRESHOLDS,
+    use_market_filter: tuple[bool, ...] = _IMC_USE_MARKET_FILTER,
+    direction_modes: tuple[str, ...] = _IMC_DIRECTION_MODES,
+) -> dict[str, list[IMCParams]]:
+    """Build per-ticker IMC parameter grids.
+
+    Default cell count per ticker:
+      2 obs × 1 dec × 1 exit × 2 atr_period × 3 atr_mult × 2 vol_z × 2 mkt × 3 dir
+      = 144 cells/ticker. Stays under the ~150-cell guideline in the plan.
+    """
+    mult_map = atr_multiples_by_ticker or _IMC_ATR_MULTIPLES
+    grids: dict[str, list[IMCParams]] = {}
+    for sym in universe:
+        atr_multiples = mult_map.get(sym, (0.50, 0.75, 1.00))
+        grids[sym] = [
+            IMCParams(
+                observation_window_minutes=ow,
+                decision_time_minutes=dt,
+                exit_time_minutes=xt,
+                atr_period_bars=ap,
+                atr_multiple=am,
+                volume_z_threshold=vz,
+                use_market_filter=mf,
+                direction_mode=dm,
+            )
+            for ow, dt, xt, ap, am, vz, mf, dm in product(
+                observation_windows,
+                decision_times,
+                exit_times,
+                atr_periods,
+                atr_multiples,
+                volume_z_thresholds,
+                use_market_filter,
+                direction_modes,
+            )
+        ]
+    return grids
+
+
+def grid_uses_market_filter(grid: dict[str, list]) -> bool:
+    """Return True if any IMC param in the per-ticker grid sets use_market_filter.
+
+    The CLI uses this to decide whether to wire context_symbols=("SPYM",)
+    into the BacktestRunner.
+    """
+    for params_list in grid.values():
+        for p in params_list:
+            if isinstance(p, IMCParams) and p.use_market_filter:
+                return True
+    return False

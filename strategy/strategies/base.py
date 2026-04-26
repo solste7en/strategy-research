@@ -78,12 +78,21 @@ class Strategy(Protocol):
     Implementations must not do I/O. They are handed a DataFrame of regular-
     session bars for one symbol on one day and return the Trade list for that
     day (empty if no signal fired).
+
+    ``context_bars`` is an optional dict ``{symbol -> day_bars}`` for cross-
+    asset context (e.g. SPYM as a market-regime filter). The harness slices
+    each context symbol's bars to the same trading session as ``day_bars``
+    before calling. Strategies that don't need cross-asset context simply
+    ignore the kwarg, which keeps single-symbol implementations unchanged.
     """
 
     name: str
 
     def generate_trades_for_day(
-        self, symbol: str, day_bars: pd.DataFrame
+        self,
+        symbol: str,
+        day_bars: pd.DataFrame,
+        context_bars: dict[str, pd.DataFrame] | None = None,
     ) -> list[Trade]:
         """Return 0 or 1 Trade(s) for ``symbol`` on the day represented by
         ``day_bars`` (a chronologically sorted, regular-session DataFrame
@@ -92,5 +101,9 @@ class Strategy(Protocol):
         A ``shares`` value of ``0`` is a sentinel — the harness fills in the
         correct size from the RiskManager before persisting the Trade. The
         strategy itself should not know about sizing.
+
+        ``context_bars`` carries per-context-symbol bars sliced to the same
+        session date. ``None`` (default) means no context was requested, which
+        is the normal case for single-symbol strategies.
         """
         ...
